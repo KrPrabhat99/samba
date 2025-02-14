@@ -2113,17 +2113,17 @@ static int net_ads_dns(struct net_context *c, int argc, const char *argv[])
 			"register",
 			net_ads_dns_register,
 			NET_TRANSPORT_ADS,
-			N_("Add host dns entry to AD"),
-			N_("net ads dns register\n"
-			   "    Add host dns entry to AD")
+			N_("Add FQDN dns entry to AD"),
+			N_("net ads dns register [FQDN [IP [IP.....]]]\n"
+			   "    Add FQDN dns entry to AD")
 		},
 		{
 			"unregister",
 			net_ads_dns_unregister,
 			NET_TRANSPORT_ADS,
-			N_("Remove host dns entry from AD"),
-			N_("net ads dns unregister\n"
-			   "    Remove host dns entry from AD")
+			N_("Remove FQDN dns entry from AD"),
+			N_("net ads dns unregister <FQDN>\n"
+			   "    Remove FQDN dns entry from AD")
 		},
 		{
 			"async",
@@ -3345,7 +3345,7 @@ static int net_ads_setspn_list(struct net_context *c,
 	if (c->display_usage) {
 		d_printf("%s\n%s",
 			 _("Usage:"),
-			 _("net ads setspn list <machinename>\n"));
+			 _("net ads setspn list [machinename]\n"));
 		TALLOC_FREE(tmp_ctx);
 		return -1;
 	}
@@ -3378,7 +3378,7 @@ static int net_ads_setspn_add(struct net_context *c, int argc, const char **argv
 	if (c->display_usage || argc < 1) {
 		d_printf("%s\n%s",
 			 _("Usage:"),
-			 _("net ads setspn add <machinename> SPN\n"));
+			 _("net ads setspn add [machinename] spn\n"));
 		TALLOC_FREE(tmp_ctx);
 		return -1;
 	}
@@ -3411,7 +3411,7 @@ static int net_ads_setspn_delete(struct net_context *c, int argc, const char **a
 	if (c->display_usage || argc < 1) {
 		d_printf("%s\n%s",
 			 _("Usage:"),
-			 _("net ads setspn delete <machinename> SPN\n"));
+			 _("net ads setspn delete [machinename] spn\n"));
 		TALLOC_FREE(tmp_ctx);
 		return -1;
 	}
@@ -3441,7 +3441,7 @@ int net_ads_setspn(struct net_context *c, int argc, const char **argv)
 			net_ads_setspn_list,
 			NET_TRANSPORT_ADS,
 			N_("List Service Principal Names (SPN)"),
-			N_("net ads setspn list machine\n"
+			N_("net ads setspn list [machine]\n"
 			   "    List Service Principal Names (SPN)")
 		},
 		{
@@ -3449,7 +3449,7 @@ int net_ads_setspn(struct net_context *c, int argc, const char **argv)
 			net_ads_setspn_add,
 			NET_TRANSPORT_ADS,
 			N_("Add Service Principal Names (SPN)"),
-			N_("net ads setspn add machine spn\n"
+			N_("net ads setspn add [machine] spn\n"
 			   "    Add Service Principal Names (SPN)")
 		},
 		{
@@ -3457,7 +3457,7 @@ int net_ads_setspn(struct net_context *c, int argc, const char **argv)
 			net_ads_setspn_delete,
 			NET_TRANSPORT_ADS,
 			N_("Delete Service Principal Names (SPN)"),
-			N_("net ads setspn delete machine spn\n"
+			N_("net ads setspn delete [machine] spn\n"
 			   "    Delete Service Principal Names (SPN)")
 		},
 		{NULL, NULL, 0, NULL, NULL}
@@ -3561,7 +3561,7 @@ static int net_ads_enctypes_list(struct net_context *c, int argc, const char **a
 
 	if (c->display_usage || (argc < 1)) {
 		d_printf(  "%s\n"
-			   "net ads enctypes list\n"
+			   "net ads enctypes list <account_name>\n"
 			   "    %s\n",
 			 _("Usage:"),
 			 _("List supported enctypes"));
@@ -3743,7 +3743,7 @@ static int net_ads_enctypes(struct net_context *c, int argc, const char **argv)
 			net_ads_enctypes_list,
 			NET_TRANSPORT_ADS,
 			N_("List the supported encryption types"),
-			N_("net ads enctypes list\n"
+			N_("net ads enctypes list <account_name>\n"
 			   "    List the supported encryption types")
 		},
 		{
@@ -3751,16 +3751,16 @@ static int net_ads_enctypes(struct net_context *c, int argc, const char **argv)
 			net_ads_enctypes_set,
 			NET_TRANSPORT_ADS,
 			N_("Set the supported encryption types"),
-			N_("net ads enctypes set\n"
+			N_("net ads enctypes set <account_name> [enctypes]\n"
 			   "    Set the supported encryption types")
 		},
 		{
 			"delete",
 			net_ads_enctypes_delete,
 			NET_TRANSPORT_ADS,
-			N_("Delete the supported encryption types"),
-			N_("net ads enctypes delete\n"
-			   "    Delete the supported encryption types")
+			N_("Delete the msDS-SupportedEncryptionTypes attribute"),
+			N_("net ads enctypes delete <account_name>\n"
+			   "    Delete the LDAP attribute")
 		},
 
 		{NULL, NULL, 0, NULL, NULL}

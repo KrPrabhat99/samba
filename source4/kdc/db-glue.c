@@ -1232,7 +1232,7 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 		config_kdc_enctypes != 0 ?
 		config_kdc_enctypes :
 		ENC_ALL_TYPES;
-	const char *samAccountName = ldb_msg_find_attr_as_string(msg, "samAccountName", NULL);
+	const char *samAccountName = ldb_msg_find_attr_as_string(msg, "sAMAccountName", NULL);
 
 	const struct authn_kerberos_client_policy *authn_client_policy = NULL;
 	const struct authn_server_policy *authn_server_policy = NULL;
@@ -2266,6 +2266,24 @@ static krb5_error_code samba_kdc_trust_message2entry(krb5_context context,
 		/*
 		 * Only UPLEVEL domains support kerberos here,
 		 * as we don't support LSA_TRUST_TYPE_MIT.
+		 */
+		krb5_clear_error_message(context);
+		ret = SDB_ERR_NOENTRY;
+		goto out;
+	}
+
+	if (tdo->trust_attributes & LSA_TRUST_ATTRIBUTE_WITHIN_FOREST) {
+		/*
+		 * We don't support WITHIN_FOREST yet
+		 */
+		krb5_clear_error_message(context);
+		ret = SDB_ERR_NOENTRY;
+		goto out;
+	}
+
+	if (tdo->trust_attributes & LSA_TRUST_ATTRIBUTE_PIM_TRUST) {
+		/*
+		 * We don't support PIM_TRUST yet
 		 */
 		krb5_clear_error_message(context);
 		ret = SDB_ERR_NOENTRY;

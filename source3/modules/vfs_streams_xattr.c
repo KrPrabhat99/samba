@@ -120,8 +120,7 @@ static int streams_xattr_get_name(vfs_handle_struct *handle,
 		return ENOMEM;
 	}
 
-	DEBUG(10, ("xattr_name: %s, stream_name: %s\n", *xattr_name,
-		   stream_name));
+	DBG_DEBUG("%s, stream_name: %s\n", *xattr_name, stream_name);
 
 	return 0;
 }
@@ -200,7 +199,7 @@ static int streams_xattr_fstat(vfs_handle_struct *handle, files_struct *fsp,
 		return -1;
 	}
 
-	DEBUG(10, ("sbuf->st_ex_size = %d\n", (int)sbuf->st_ex_size));
+	DBG_DEBUG("sbuf->st_ex_size = %jd\n", (intmax_t)sbuf->st_ex_size);
 
 	sbuf->st_ex_ino = hash_inode(sbuf, io->xattr_name);
 	sbuf->st_ex_mode &= ~S_IFMT;
@@ -310,6 +309,84 @@ static int streams_xattr_lstat(vfs_handle_struct *handle,
 	return SMB_VFS_NEXT_LSTAT(handle, smb_fname);
 }
 
+static int streams_xattr_fstatat(struct vfs_handle_struct *handle,
+				 const struct files_struct *dirfsp,
+				 const struct smb_filename *smb_fname,
+				 SMB_STRUCT_STAT *sbuf,
+				 int flags)
+{
+	char *xattr_name = NULL;
+	struct smb_filename *pathref = NULL;
+	struct files_struct *fsp = smb_fname->fsp;
+	ssize_t size;
+	NTSTATUS status;
+	int ret = -1;
+
+	DBG_DEBUG("called for [%s/%s]\n",
+		  dirfsp->fsp_name->base_name,
+		  smb_fname_str_dbg(smb_fname));
+
+	if (!is_named_stream(smb_fname)) {
+		return SMB_VFS_NEXT_FSTATAT(
+			handle, dirfsp, smb_fname, sbuf, flags);
+	}
+
+	SET_STAT_INVALID(*sbuf);
+
+	/* Derive the xattr name to lookup. */
+	ret = streams_xattr_get_name(handle,
+				     talloc_tos(),
+				     smb_fname->stream_name,
+				     &xattr_name);
+	if (ret != 0) {
+		errno = ret;
+		ret = -1;
+		goto done;
+	}
+
+	if (fsp == NULL) {
+		status = synthetic_pathref(talloc_tos(),
+					   dirfsp,
+					   smb_fname->base_name,
+					   NULL,
+					   NULL,
+					   smb_fname->twrp,
+					   smb_fname->flags,
+					   &pathref);
+		if (!NT_STATUS_IS_OK(status)) {
+			errno = ENOENT;
+			ret = -1;
+			goto done;
+		}
+		fsp = pathref->fsp;
+	} else {
+		fsp = fsp->base_fsp;
+	}
+
+	*sbuf = fsp->fsp_name->st;
+
+	size = get_xattr_size_fsp(fsp, xattr_name);
+	if (size == -1) {
+		errno = ENOENT;
+		ret = -1;
+		goto done;
+	}
+	sbuf->st_ex_size = size;
+	sbuf->st_ex_ino = hash_inode(sbuf, xattr_name);
+	sbuf->st_ex_mode &= ~S_IFMT;
+	sbuf->st_ex_mode |= S_IFREG;
+	sbuf->st_ex_blocks = sbuf->st_ex_size / STAT_ST_BLOCKSIZE + 1;
+
+done:
+	{
+		int err = errno;
+		TALLOC_FREE(pathref);
+		TALLOC_FREE(xattr_name);
+		errno = err;
+	}
+	return ret;
+}
+
 static int streams_xattr_openat(struct vfs_handle_struct *handle,
 				const struct files_struct *dirfsp,
 				const struct smb_filename *smb_fname,
@@ -339,7 +416,7 @@ static int streams_xattr_openat(struct vfs_handle_struct *handle,
 					   how);
 	}
 
-	if (how->resolve != 0) {
+	if ((how->resolve & ~VFS_OPEN_HOW_WITH_BACKUP_INTENT) != 0) {
 		errno = ENOSYS;
 		return -1;
 	}
@@ -366,8 +443,9 @@ static int streams_xattr_openat(struct vfs_handle_struct *handle,
 			 * we got O_CREAT, the higher levels should have created
 			 * the base file for us.
 			 */
-			DBG_DEBUG("streams_xattr_open: base file %s not around, "
-				  "returning ENOENT\n", smb_fname->base_name);
+			DBG_DEBUG("base file %s not around, "
+				  "returning ENOENT\n",
+				  smb_fname->base_name);
 			errno = ENOENT;
 			goto fail;
 		}
@@ -458,8 +536,9 @@ static int streams_xattr_close(vfs_handle_struct *handle,
 
 	fd = fsp_get_pathref_fd(fsp);
 
-	DBG_DEBUG("streams_xattr_close called [%s] fd [%d]\n",
-			smb_fname_str_dbg(fsp->fsp_name), fd);
+	DBG_DEBUG("called [%s] fd [%d]\n",
+		  smb_fname_str_dbg(fsp->fsp_name),
+		  fd);
 
 	if (!fsp_is_alternate_stream(fsp)) {
 		return SMB_VFS_NEXT_CLOSE(handle, fsp);
@@ -926,7 +1005,7 @@ static ssize_t streams_xattr_pwrite(vfs_handle_struct *handle,
 	struct ea_struct ea;
 	int ret;
 
-	DEBUG(10, ("streams_xattr_pwrite called for %d bytes\n", (int)n));
+	DBG_DEBUG("offset=%jd, size=%zu\n", (intmax_t)offset, n);
 
 	if (sio == NULL) {
 		return SMB_VFS_NEXT_PWRITE(handle, fsp, data, n, offset);
@@ -1008,8 +1087,7 @@ static ssize_t streams_xattr_pread(vfs_handle_struct *handle,
 	int ret;
 	size_t length, overlap;
 
-	DEBUG(10, ("streams_xattr_pread: offset=%d, size=%d\n",
-		   (int)offset, (int)n));
+	DBG_DEBUG("offset=%jd, size=%zu\n", (intmax_t)offset, n);
 
 	if (sio == NULL) {
 		return SMB_VFS_NEXT_PREAD(handle, fsp, data, n, offset);
@@ -1030,8 +1108,7 @@ static ssize_t streams_xattr_pread(vfs_handle_struct *handle,
 
 	length = ea.value.length-1;
 
-	DBG_DEBUG("get_ea_value_fsp returned %d bytes\n",
-		   (int)length);
+	DBG_DEBUG("get_ea_value_fsp returned %zu bytes\n", length);
 
         /* Attempt to read past EOF. */
         if (length <= offset) {
@@ -1215,8 +1292,9 @@ static int streams_xattr_ftruncate(struct vfs_handle_struct *handle,
         struct stream_io *sio =
 		(struct stream_io *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 
-	DEBUG(10, ("streams_xattr_ftruncate called for file %s offset %.0f\n",
-		   fsp_str_dbg(fsp), (double)offset));
+	DBG_DEBUG("called for file %s offset %ju\n",
+		  fsp_str_dbg(fsp),
+		  (intmax_t)offset);
 
 	if (sio == NULL) {
 		return SMB_VFS_NEXT_FTRUNCATE(handle, fsp, offset);
@@ -1278,9 +1356,10 @@ static int streams_xattr_fallocate(struct vfs_handle_struct *handle,
         struct stream_io *sio =
 		(struct stream_io *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 
-	DEBUG(10, ("streams_xattr_fallocate called for file %s offset %.0f"
-		"len = %.0f\n",
-		fsp_str_dbg(fsp), (double)offset, (double)len));
+	DBG_DEBUG("called for file %s offset %jd len=%jd\n",
+		  fsp_str_dbg(fsp),
+		  (intmax_t)offset,
+		  (intmax_t)len);
 
 	if (sio == NULL) {
 		return SMB_VFS_NEXT_FALLOCATE(handle, fsp, mode, offset, len);
@@ -1585,6 +1664,7 @@ static struct vfs_fn_pointers vfs_streams_xattr_fns = {
 	.stat_fn = streams_xattr_stat,
 	.fstat_fn = streams_xattr_fstat,
 	.lstat_fn = streams_xattr_lstat,
+	.fstatat_fn = streams_xattr_fstatat,
 	.pread_fn = streams_xattr_pread,
 	.pwrite_fn = streams_xattr_pwrite,
 	.pread_send_fn = streams_xattr_pread_send,

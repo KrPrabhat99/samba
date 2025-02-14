@@ -720,11 +720,9 @@ void reply_checkpath(struct smb_request *req)
 		goto path_err;
 	}
 
-	if (!VALID_STAT(smb_fname->st) &&
-	    (SMB_VFS_STAT(conn, smb_fname) != 0)) {
-		DEBUG(3,("reply_checkpath: stat of %s failed (%s)\n",
-			smb_fname_str_dbg(smb_fname), strerror(errno)));
-		status = map_nt_error_from_unix(errno);
+	if (!VALID_STAT(smb_fname->st)) {
+		DBG_NOTICE("%s not found\n", smb_fname_str_dbg(smb_fname));
+		status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
 		goto path_err;
 	}
 
@@ -831,11 +829,9 @@ void reply_getatr(struct smb_request *req)
 			reply_nterror(req, status);
 			goto out;
 		}
-		if (!VALID_STAT(smb_fname->st) &&
-		    (SMB_VFS_STAT(conn, smb_fname) != 0)) {
-			DEBUG(3,("reply_getatr: stat of %s failed (%s)\n",
-				 smb_fname_str_dbg(smb_fname),
-				 strerror(errno)));
+		if (!VALID_STAT(smb_fname->st)) {
+			DBG_NOTICE("File %s not found\n",
+				   smb_fname_str_dbg(smb_fname));
 			reply_nterror(req,  map_nt_error_from_unix(errno));
 			goto out;
 		}
@@ -2573,15 +2569,19 @@ void reply_ctemp(struct smb_request *req)
 	}
 
 	for (i = 0; i < 10; i++) {
+		char rand_str[6];
+
+		generate_random_str_list_buf(rand_str,
+					     sizeof(rand_str),
+					     "0123456789");
+
 		if (*wire_name) {
 			fname = talloc_asprintf(ctx,
-					"%s/TMP%s",
-					wire_name,
-					generate_random_str_list(ctx, 5, "0123456789"));
+						"%s/TMP%s",
+						wire_name,
+						rand_str);
 		} else {
-			fname = talloc_asprintf(ctx,
-					"TMP%s",
-					generate_random_str_list(ctx, 5, "0123456789"));
+			fname = talloc_asprintf(ctx, "TMP%s", rand_str);
 		}
 
 		if (!fname) {

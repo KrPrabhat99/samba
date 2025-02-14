@@ -72,7 +72,8 @@ NTSTATUS schedule_aio_smb2_write(connection_struct *conn,
 				DATA_BLOB in_data,
 				bool write_through);
 bool cancel_smb2_aio(struct smb_request *smbreq);
-bool aio_add_req_to_fsp(files_struct *fsp, struct tevent_req *req);
+struct aio_req_fsp_link;
+struct aio_req_fsp_link *aio_add_req_to_fsp(files_struct *fsp, struct tevent_req *req);
 struct aio_extra *create_aio_extra(TALLOC_CTX *mem_ctx,
 				   files_struct *fsp,
 				   size_t buflen);
@@ -130,8 +131,9 @@ void msg_close_file(struct messaging_context *msg_ctx,
 		    uint32_t msg_type,
 		    struct server_id server_id,
 		    DATA_BLOB *data);
-NTSTATUS delete_all_streams(connection_struct *conn,
-			const struct smb_filename *smb_fname);
+NTSTATUS delete_all_streams(struct files_struct *fsp,
+			    struct files_struct *dirfsp,
+			    struct smb_filename *fsp_atname);
 NTSTATUS recursive_rmdir(TALLOC_CTX *ctx,
 		     connection_struct *conn,
 		     struct smb_filename *smb_dname);
@@ -411,7 +413,7 @@ NTSTATUS reference_smb_fname_fsp_link(struct smb_filename *smb_fname_dst,
 				      const struct smb_filename *smb_fname_src);
 
 NTSTATUS synthetic_pathref(TALLOC_CTX *mem_ctx,
-			   struct files_struct *dirfsp,
+			   const struct files_struct *dirfsp,
 			   const char *base_name,
 			   const char *stream_name,
 			   const SMB_STRUCT_STAT *psbuf,
@@ -1163,7 +1165,6 @@ void sys_utmp_yield(const char *username, const char *hostname,
 
 bool vfs_init_custom(connection_struct *conn, const char *vfs_object);
 bool smbd_vfs_init(connection_struct *conn);
-NTSTATUS vfs_file_exist(connection_struct *conn, struct smb_filename *smb_fname);
 bool vfs_valid_pread_range(off_t offset, size_t length);
 bool vfs_valid_pwrite_range(const struct files_struct *fsp,
 			    off_t offset,

@@ -1544,18 +1544,6 @@ static bool torture_samba3_sessionkey(struct torture_context *torture)
 
 	cli_credentials_set_workstation(anon_creds, wks_name, CRED_SPECIFIED);
 
-
-	if (!torture_setting_bool(torture, "samba3", false)) {
-
-		/* Samba3 in the build farm right now does this happily. Need
-		 * to fix :-) */
-
-		if (test_join3(torture, false, anon_creds, NULL, wks_name)) {
-			torture_fail(torture, "join using anonymous bind on an anonymous smb "
-				 "connection succeeded -- HUH??\n");
-		}
-	}
-
 	torture_assert(torture,
 		test_join3(torture, false, samba_cmdline_get_creds(),
 		NULL, wks_name),
@@ -1931,7 +1919,7 @@ static bool test_NetShareGetInfo(struct torture_context *tctx,
 	struct srvsvc_NetShareGetInfo r;
 	union srvsvc_NetShareInfo info;
 	uint32_t levels[] = { 0, 1, 2, 501, 502, 1004, 1005, 1006, 1007, 1501 };
-	int i;
+	size_t i;
 	bool ret = true;
 	struct dcerpc_binding_handle *b = p->binding_handle;
 
@@ -1984,7 +1972,7 @@ static bool test_NetShareEnum(struct torture_context *tctx,
 	struct srvsvc_NetShareCtr1007 c1007;
 	uint32_t totalentries = 0;
 	uint32_t levels[] = { 0, 1, 2, 501, 502, 1004, 1005, 1006, 1007 };
-	int i;
+	size_t i;
 	bool ret = true;
 	struct dcerpc_binding_handle *b = p->binding_handle;
 
@@ -2094,7 +2082,7 @@ static bool torture_samba3_rpc_randomauth2(struct torture_context *torture)
 	TALLOC_CTX *mem_ctx;
 	struct dcerpc_pipe *net_pipe;
 	struct dcerpc_binding_handle *net_handle;
-	char *wksname;
+	char wksname[15];
 	bool result = false;
 	NTSTATUS status;
 	struct netr_ServerReqChallenge r;
@@ -2112,11 +2100,9 @@ static bool torture_samba3_rpc_randomauth2(struct torture_context *torture)
 		return false;
 	}
 
-	if (!(wksname = generate_random_str_list(
-		      mem_ctx, 14, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))) {
-		torture_comment(torture, "generate_random_str_list failed\n");
-		goto done;
-	}
+	generate_random_str_list_buf(wksname,
+				     sizeof(wksname),
+				     "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
 
 	if (!(torture_open_connection_share(
 		      mem_ctx, &cli,
@@ -2582,7 +2568,7 @@ static bool torture_samba3_rpc_lsa(struct torture_context *torture)
 	}
 
 	{
-		int i;
+		size_t i;
 		int levels[] = { 2,3,5,6 };
 
 		for (i=0; i<ARRAY_SIZE(levels); i++) {
@@ -2658,7 +2644,7 @@ static bool find_printers(struct torture_context *tctx,
 	struct srvsvc_NetShareCtr1 c1_in;
 	struct srvsvc_NetShareCtr1 *c1;
 	uint32_t totalentries = 0;
-	int i;
+	uint32_t i;
 	struct dcerpc_binding_handle *b = p->binding_handle;
 
 	ZERO_STRUCT(c1_in);

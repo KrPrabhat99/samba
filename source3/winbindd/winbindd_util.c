@@ -53,6 +53,7 @@
    the domain name instead. */
 
 static struct winbindd_domain *_domain_list = NULL;
+static uint64_t domain_list_generation;
 
 struct winbindd_domain *domain_list(void)
 {
@@ -63,21 +64,6 @@ struct winbindd_domain *domain_list(void)
 	}
 
 	return _domain_list;
-}
-
-/* Free all entries in the trusted domain list */
-
-static void free_domain_list(void)
-{
-	struct winbindd_domain *domain = _domain_list;
-
-	while(domain) {
-		struct winbindd_domain *next = domain->next;
-
-		DLIST_REMOVE(_domain_list, domain);
-		TALLOC_FREE(domain);
-		domain = next;
-	}
 }
 
 /**
@@ -100,6 +86,79 @@ struct winbindd_domain *wb_next_domain(struct winbindd_domain *domain)
 	}
 
 	return domain;
+}
+
+void _winbindd_domain_ref_set(struct winbindd_domain_ref *ref,
+			      struct winbindd_domain *domain,
+			      const char *location,
+			      const char *func)
+{
+	if (domain == NULL) {
+		ref->internals = (struct winbindd_domain_ref_internals) {
+			.location = location,
+			.func = func,
+		};
+		return;
+	}
+
+	ref->internals = (struct winbindd_domain_ref_internals) {
+		.location = location,
+		.func = func,
+		.sid = domain->sid,
+		.generation = domain_list_generation,
+		.domain = domain,
+	};
+}
+
+bool _winbindd_domain_ref_get(struct winbindd_domain_ref *ref,
+			      struct winbindd_domain **_domain,
+			      const char *location,
+			      const char *func)
+{
+	struct winbindd_domain *domain = NULL;
+
+	if (ref->internals.stale) {
+		goto stale;
+	}
+
+	if (ref->internals.domain == NULL) {
+		*_domain = NULL;
+		return true;
+	}
+
+	if (ref->internals.generation == domain_list_generation) {
+		*_domain = ref->internals.domain;
+		return true;
+	}
+
+	domain = find_domain_from_sid_noinit(&ref->internals.sid);
+stale:
+	if (domain == NULL) {
+		struct dom_sid_buf sbuf = {};
+
+		D_ERR("%s:%s: stale domain %s, set in %s\n",
+		      func,
+		      location,
+		      dom_sid_str_buf(&ref->internals.sid, &sbuf),
+		      ref->internals.location);
+
+		ref->internals.stale = true;
+		ref->internals.domain = NULL;
+
+		*_domain = NULL;
+		return false;
+	}
+
+	ref->internals = (struct winbindd_domain_ref_internals) {
+		.location = location,
+		.func = func,
+		.sid = domain->sid,
+		.generation = domain_list_generation,
+		.domain = domain,
+	};
+
+	*_domain = domain;
+	return true;
 }
 
 static bool is_internal_domain(const struct dom_sid *sid)
@@ -150,6 +209,16 @@ static NTSTATUS add_trusted_domain(const char *domain_name,
 	if (domain != NULL) {
 		struct winbindd_domain *check_domain = NULL;
 
+		if (!dom_sid_equal(&domain->sid, sid)) {
+			struct dom_sid_buf buf2;
+			DBG_ERR("SID [%s] changed for domain [%s], "
+				"expected [%s]\n",
+				dom_sid_str_buf(sid, &buf),
+				domain->name,
+				dom_sid_str_buf(sid, &buf2));
+			return NT_STATUS_INVALID_PARAMETER;
+		}
+
 		for (check_domain = _domain_list;
 		     check_domain != NULL;
 		     check_domain = check_domain->next)
@@ -175,6 +244,14 @@ static NTSTATUS add_trusted_domain(const char *domain_name,
 
 	if ((domain != NULL) && (dns_name != NULL)) {
 		struct winbindd_domain *check_domain = NULL;
+
+		if (!strequal(domain->alt_name, dns_name)) {
+			DBG_ERR("DNS name [%s] changed for domain [%s], "
+				"expected [%s]\n",
+				dns_name, domain->name,
+				domain->alt_name);
+			return NT_STATUS_INVALID_PARAMETER;
+		}
 
 		for (check_domain = _domain_list;
 		     check_domain != NULL;
@@ -289,6 +366,7 @@ static NTSTATUS add_trusted_domain(const char *domain_name,
 
 	/* Link to domain list */
 	DLIST_ADD_END(_domain_list, domain);
+	domain_list_generation += 1;
 
 	wcache_tdc_add_domain( domain );
 
@@ -368,7 +446,7 @@ bool domain_is_forest_root(const struct winbindd_domain *domain)
 ********************************************************************/
 
 struct trustdom_state {
-	struct winbindd_domain *domain;
+	struct winbindd_domain_ref domain;
 	struct netr_DomainTrustList trusts;
 };
 
@@ -389,7 +467,7 @@ static void add_trusted_domains( struct winbindd_domain *domain )
 		DEBUG(0, ("talloc failed\n"));
 		return;
 	}
-	state->domain = domain;
+	winbindd_domain_ref_set(&state->domain, domain);
 
 	/* Called from timer, not from a real client */
 	client_name = getprogname();
@@ -416,6 +494,18 @@ static void trustdom_list_done(struct tevent_req *req)
 	bool within_forest = false;
 	NTSTATUS status, result;
 	uint32_t i;
+	struct winbindd_domain *domain = NULL;
+	bool valid;
+
+	valid = winbindd_domain_ref_get(&state->domain, &domain);
+	if (!valid) {
+		/*
+		 * winbindd_domain_ref_get() already generated
+		 * a debug message for the stale domain!
+		 */
+		TALLOC_FREE(state);
+		return;
+	}
 
 	/*
 	 * Only when we enumerate our primary domain
@@ -424,16 +514,16 @@ static void trustdom_list_done(struct tevent_req *req)
 	 * all other cases we need to clear it as the domain
 	 * is not part of our forest.
 	 */
-	if (state->domain->primary) {
+	if (domain->primary) {
 		within_forest = true;
-	} else if (domain_is_forest_root(state->domain)) {
+	} else if (domain_is_forest_root(domain)) {
 		within_forest = true;
 	}
 
 	status = dcerpc_wbint_ListTrustedDomains_recv(req, state, &result);
 	if (any_nt_status_not_ok(status, result, &status)) {
 		DBG_WARNING("Could not receive trusts for domain %s: %s-%s\n",
-			    state->domain->name, nt_errstr(status),
+			    domain->name, nt_errstr(status),
 			    nt_errstr(result));
 		TALLOC_FREE(state);
 		return;
@@ -441,13 +531,13 @@ static void trustdom_list_done(struct tevent_req *req)
 
 	for (i=0; i<state->trusts.count; i++) {
 		struct netr_DomainTrust *trust = &state->trusts.array[i];
-		struct winbindd_domain *domain = NULL;
+		struct winbindd_domain *new_domain = NULL;
 
 		if (!within_forest) {
 			trust->trust_flags &= ~NETR_TRUST_FLAG_IN_FOREST;
 		}
 
-		if (!state->domain->primary) {
+		if (!domain->primary) {
 			trust->trust_flags &= ~NETR_TRUST_FLAG_PRIMARY;
 		}
 
@@ -465,12 +555,13 @@ static void trustdom_list_done(struct tevent_req *req)
 					    trust->trust_attributes,
 					    SEC_CHAN_NULL,
 					    find_default_route_domain(),
-					    &domain);
+					    &new_domain);
 		if (!NT_STATUS_IS_OK(status) &&
 		    !NT_STATUS_EQUAL(status, NT_STATUS_NO_SUCH_DOMAIN))
 		{
 			DBG_NOTICE("add_trusted_domain returned %s\n",
 				   nt_errstr(status));
+			TALLOC_FREE(state);
 			return;
 		}
 	}
@@ -483,16 +574,16 @@ static void trustdom_list_done(struct tevent_req *req)
 	       && !forest_root)
 	*/
 
-	if (state->domain->primary) {
+	if (domain->primary) {
 		/* If this is our primary domain and we are not in the
 		   forest root, we have to scan the root trusts first */
 
-		if (!domain_is_forest_root(state->domain))
+		if (!domain_is_forest_root(domain))
 			rescan_forest_root_trusts();
 		else
 			rescan_forest_trusts();
 
-	} else if (domain_is_forest_root(state->domain)) {
+	} else if (domain_is_forest_root(domain)) {
 		/* Once we have done root forest trust search, we can
 		   go on to search the trusted forests */
 
@@ -797,7 +888,7 @@ static void wb_imsg_new_trusted_domain(struct imessaging_context *msg,
 
 	DBG_NOTICE("Rescanning trusted domains\n");
 
-	ok = add_trusted_domains_dc();
+	ok = update_trusted_domains_dc();
 	if (!ok) {
 		DBG_ERR("Failed to reload trusted domains\n");
 	}
@@ -846,13 +937,229 @@ static bool migrate_secrets_tdb_to_ldb(struct winbindd_domain *domain)
 	return true;
 }
 
-bool add_trusted_domains_dc(void)
+static void free_domain(struct winbindd_domain *d)
+{
+	struct winbindd_domain *nd = NULL;
+	struct dom_sid_buf sbuf = {};
+
+	nd = find_domain_from_sid_noinit(&d->sid);
+	if (nd != NULL) {
+		DBG_WARNING("Free updated domain[%p] name[%s] %s "
+			    "replaced by domain[%p] name[%s]\n",
+			    d, d->name, dom_sid_str_buf(&d->sid, &sbuf),
+			    nd, nd->name);
+	} else {
+		DBG_WARNING("Free removed domain[%p] name[%s] %s\n",
+			    d, d->name, dom_sid_str_buf(&d->sid, &sbuf));
+	}
+	talloc_free(d);
+}
+
+static void terminate_child(struct tevent_req *subreq)
+{
+	struct winbindd_child *c =
+		(struct winbindd_child *)
+		tevent_req_callback_data_void(subreq);
+	struct winbindd_domain *d = c->domain;
+	size_t ci;
+	bool ok;
+
+	ok = tevent_queue_wait_recv(subreq);
+	SMB_ASSERT(ok);
+	TALLOC_FREE(subreq);
+
+	if (c->pid != 0) {
+		kill(c->pid, SIGTERM);
+		c->pid = 0;
+		if (c->sock != -1) {
+			close(c->sock);
+		}
+		c->sock = -1;
+		TALLOC_FREE(c->monitor_fde);
+	}
+
+	c = NULL;
+	if (d == NULL) {
+		return;
+	}
+	if (d->internal) {
+		return;
+	}
+
+	for (ci = 0; ci < talloc_array_length(d->children); ci++) {
+		c = &d->children[ci];
+
+		if (c->pid != 0) {
+			/*
+			 * still waiting
+			 */
+			return;
+		}
+	}
+
+	free_domain(d);
+}
+
+static void terminate_domain(struct tevent_req *subreq)
+{
+	struct winbindd_domain *d =
+		tevent_req_callback_data(subreq,
+		struct winbindd_domain);
+	size_t ci;
+	bool ok;
+
+	ok = tevent_queue_wait_recv(subreq);
+	SMB_ASSERT(ok);
+
+	/* NO TALLOC_FREE(subreq); */
+	subreq = NULL;
+
+	for (ci = 0; ci < talloc_array_length(d->children); ci++) {
+		struct winbindd_child *c = &d->children[ci];
+
+		if (c->pid == 0) {
+			continue;
+		}
+
+		subreq = tevent_queue_wait_send(d->children,
+						global_event_context(),
+						c->queue);
+		if (subreq == NULL) {
+			return;
+		}
+		tevent_req_set_callback(subreq,
+					terminate_child,
+					c);
+	}
+
+	if (subreq != NULL) {
+		/*
+		 * still waiting
+		 */
+		return;
+	}
+
+	free_domain(d);
+}
+
+static bool remove_trusted_domains_dc(void)
+{
+	struct winbindd_domain *d = NULL;
+	struct winbindd_domain *n = NULL;
+	struct winbindd_child *c = NULL;
+	struct tevent_req *subreq = NULL;
+
+	SMB_ASSERT(IS_DC);
+
+	/*
+	 * We need to terminate all
+	 * child processes, but we need
+	 * to go through the child and domain
+	 * queues * in order to keep existing
+	 * requests to finish.
+	 *
+	 * First start with the idmap and locator
+	 * children
+	 */
+
+	c = idmap_child();
+	if (c->pid != 0) {
+		subreq = tevent_queue_wait_send(c,
+						global_event_context(),
+						c->queue);
+		if (subreq == NULL) {
+			return false;
+		}
+		tevent_req_set_callback(subreq,
+					terminate_child,
+					c);
+	}
+
+	c = locator_child();
+	if (c->pid != 0) {
+		subreq = tevent_queue_wait_send(c,
+						global_event_context(),
+						c->queue);
+		if (subreq == NULL) {
+			return false;
+		}
+		tevent_req_set_callback(subreq,
+					terminate_child,
+					c);
+	}
+
+	/*
+	 * For internal domains BUILTIN and local SAM
+	 * we just terminate the children, forcing
+	 * a re-fork
+	 */
+	for (d = _domain_list; d != NULL; d = d->next) {
+		size_t ci;
+
+		if (!d->internal) {
+			continue;
+		}
+
+		for (ci = 0; ci < talloc_array_length(d->children); ci++) {
+			c = &d->children[ci];
+
+			if (c->pid == 0) {
+				continue;
+			}
+
+			subreq = tevent_queue_wait_send(d->children,
+							global_event_context(),
+							c->queue);
+			if (subreq == NULL) {
+				return false;
+			}
+			tevent_req_set_callback(subreq,
+						terminate_child,
+						c);
+		}
+	}
+
+	/*
+	 * For trusted domain
+	 * we need to wait in
+	 * the domain queue in order
+	 * to let pending requests
+	 * use the existing domain
+	 * children.
+	 */
+	for (d = _domain_list; d != NULL; d = n) {
+		n = d->next;
+
+		if (d->internal) {
+			continue;
+		}
+
+		subreq = tevent_queue_wait_send(d,
+						global_event_context(),
+						d->queue);
+		if (subreq == NULL) {
+			return false;
+		}
+		tevent_req_set_callback(subreq,
+					terminate_domain,
+					d);
+
+		DLIST_REMOVE(_domain_list, d);
+		domain_list_generation += 1;
+	}
+
+	return true;
+}
+
+static bool add_trusted_domains_dc(void)
 {
 	struct winbindd_domain *domain =  NULL;
 	struct pdb_trusted_domain **domains = NULL;
 	uint32_t num_domains = 0;
 	uint32_t i;
 	NTSTATUS status;
+
+	SMB_ASSERT(IS_DC);
 
 	if (!(pdb_capabilities() & PDB_CAP_TRUSTED_DOMAINS_EX)) {
 		struct trustdom_info **ti = NULL;
@@ -909,8 +1216,26 @@ bool add_trusted_domains_dc(void)
 		if (domains[i]->trust_direction & LSA_TRUST_DIRECTION_OUTBOUND) {
 			trust_flags |= NETR_TRUST_FLAG_OUTBOUND;
 		}
+		if (domains[i]->trust_attributes & LSA_TRUST_ATTRIBUTE_PIM_TRUST) {
+			/*
+			 * We don't support PIM_TRUST yet.
+			 */
+			DBG_WARNING("Ignoring PIM_TRUST trust to "
+				    "domain[%s/%s]\n",
+				    domains[i]->netbios_name,
+				    domains[i]->domain_name);
+			continue;
+		}
 		if (domains[i]->trust_attributes & LSA_TRUST_ATTRIBUTE_WITHIN_FOREST) {
-			trust_flags |= NETR_TRUST_FLAG_IN_FOREST;
+			/*
+			 * We don't support WITHIN_FOREST yet.
+			 */
+			DBG_WARNING("Ignoring WITHIN_FOREST trust to "
+				    "domain[%s/%s]\n",
+				    domains[i]->netbios_name,
+				    domains[i]->domain_name);
+			/* trust_flags |= NETR_TRUST_FLAG_IN_FOREST; */
+			continue;
 		}
 
 		if (domains[i]->trust_attributes & LSA_TRUST_ATTRIBUTE_CROSS_ORGANIZATION) {
@@ -1029,6 +1354,26 @@ bool add_trusted_domains_dc(void)
 	return true;
 }
 
+bool update_trusted_domains_dc(void)
+{
+	bool ok;
+
+	if (!IS_DC) {
+		return true;
+	}
+
+	ok = remove_trusted_domains_dc();
+	if (!ok) {
+		return false;
+	}
+
+	ok = add_trusted_domains_dc();
+	if (!ok) {
+		return false;
+	}
+
+	return true;
+}
 
 /* Look up global info for the winbind daemon */
 bool init_domain_list(void)
@@ -1039,8 +1384,8 @@ bool init_domain_list(void)
 	NTSTATUS status;
 	bool ok;
 
-	/* Free existing list */
-	free_domain_list();
+	/* the list should be empty! */
+	SMB_ASSERT(_domain_list == NULL);
 
 	/* BUILTIN domain */
 

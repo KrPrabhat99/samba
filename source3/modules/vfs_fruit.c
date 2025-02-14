@@ -229,12 +229,10 @@ static struct adouble *ad_get_meta_fsp(TALLOC_CTX *ctx,
 		return NULL;
 	}
 
-	smb_fname_cp = cp_smb_filename(ctx,
-				       smb_fname);
+	smb_fname_cp = cp_smb_filename_nostream(ctx, smb_fname);
 	if (smb_fname_cp == NULL) {
 		return NULL;
 	}
-	TALLOC_FREE(smb_fname_cp->stream_name);
 	config->in_openat_pathref_fsp = true;
 	status = openat_pathref_fsp(handle->conn->cwd_fsp,
 				    smb_fname_cp);
@@ -291,7 +289,7 @@ static int init_fruit_config(vfs_handle_struct *handle)
 	if (enumval == -1) {
 		DEBUG(1, ("value for %s: resource type unknown\n",
 			  FRUIT_PARAM_TYPE_NAME));
-		return -1;
+		goto fail;
 	}
 	config->rsrc = (enum fruit_rsrc)enumval;
 
@@ -300,7 +298,7 @@ static int init_fruit_config(vfs_handle_struct *handle)
 	if (enumval == -1) {
 		DEBUG(1, ("value for %s: metadata type unknown\n",
 			  FRUIT_PARAM_TYPE_NAME));
-		return -1;
+		goto fail;
 	}
 	config->meta = (enum fruit_meta)enumval;
 
@@ -309,7 +307,7 @@ static int init_fruit_config(vfs_handle_struct *handle)
 	if (enumval == -1) {
 		DEBUG(1, ("value for %s: locking type unknown\n",
 			  FRUIT_PARAM_TYPE_NAME));
-		return -1;
+		goto fail;
 	}
 	config->locking = (enum fruit_locking)enumval;
 
@@ -318,7 +316,7 @@ static int init_fruit_config(vfs_handle_struct *handle)
 	if (enumval == -1) {
 		DEBUG(1, ("value for %s: encoding type unknown\n",
 			  FRUIT_PARAM_TYPE_NAME));
-		return -1;
+		goto fail;
 	}
 	config->encoding = (enum fruit_encoding)enumval;
 
@@ -385,6 +383,13 @@ static int init_fruit_config(vfs_handle_struct *handle)
 				return -1);
 
 	return 0;
+fail:
+	{
+		int err = errno;
+		TALLOC_FREE(config);
+		errno = err;
+	}
+	return -1;
 }
 
 static bool add_fruit_stream(TALLOC_CTX *mem_ctx, unsigned int *num_streams,
@@ -424,7 +429,7 @@ static void filter_empty_rsrc_stream(unsigned int *num_streams,
 		if (strequal_m(s->name, AFPRESOURCE_STREAM) &&
 		    (s->size == 0)) {
 			TALLOC_FREE(s->name);
-			ARRAY_DEL_ELEMENT(streams, i, *num_streams);
+			ARRAY_DEL_ELEMENT((*streams), i, *num_streams);
 			*num_streams -= 1;
 			return;
 		}
@@ -631,7 +636,7 @@ static NTSTATUS fruit_check_access(vfs_handle_struct *handle,
 	/* FIXME: hardcoded data fork, add resource fork */
 	enum apple_fork fork_type = APPLE_FORK_DATA;
 
-	DBG_DEBUG("fruit_check_access: %s, am: %s/%s, sm: 0x%x\n",
+	DBG_DEBUG("%s, am: %s/%s, sm: 0x%x\n",
 		  fsp_str_dbg(fsp),
 		  access_mask & FILE_READ_DATA ? "READ" :"-",
 		  access_mask & FILE_WRITE_DATA ? "WRITE" : "-",
@@ -1737,7 +1742,7 @@ static int fruit_openat(vfs_handle_struct *handle,
 					   how);
 	}
 
-	if (how->resolve != 0) {
+	if ((how->resolve & ~VFS_OPEN_HOW_WITH_BACKUP_INTENT) != 0) {
 		errno = ENOSYS;
 		return -1;
 	}
@@ -1953,12 +1958,41 @@ static int fruit_unlink_meta_stream(vfs_handle_struct *handle,
 }
 
 static int fruit_unlink_meta_netatalk(vfs_handle_struct *handle,
+				      struct files_struct *dirfsp,
 				      const struct smb_filename *smb_fname)
 {
-	SMB_ASSERT(smb_fname->fsp != NULL);
-	SMB_ASSERT(fsp_is_alternate_stream(smb_fname->fsp));
-	return SMB_VFS_FREMOVEXATTR(smb_fname->fsp->base_fsp,
-				   AFPINFO_EA_NETATALK);
+	struct smb_filename *base_name = NULL;
+	struct files_struct *base_fsp = NULL;
+	int ret = -1;
+
+	if (smb_fname->fsp == NULL) {
+		NTSTATUS status;
+
+		base_name = cp_smb_filename_nostream(talloc_tos(), smb_fname);
+		if (base_name == NULL) {
+			errno = ENOMEM;
+			goto done;
+		}
+
+		status = openat_pathref_fsp(dirfsp, base_name);
+		if (!NT_STATUS_IS_OK(status)) {
+			errno = map_errno_from_nt_status(status);
+			goto done;
+		}
+		base_fsp = base_name->fsp;
+	} else {
+		SMB_ASSERT(fsp_is_alternate_stream(smb_fname->fsp));
+		base_fsp = smb_fname->fsp->base_fsp;
+	}
+
+	ret = SMB_VFS_FREMOVEXATTR(base_fsp, AFPINFO_EA_NETATALK);
+done:
+	{
+		int err = errno;
+		TALLOC_FREE(base_name);
+		errno = err;
+	}
+	return ret;
 }
 
 static int fruit_unlink_meta(vfs_handle_struct *handle,
@@ -1979,7 +2013,7 @@ static int fruit_unlink_meta(vfs_handle_struct *handle,
 		break;
 
 	case FRUIT_META_NETATALK:
-		rc = fruit_unlink_meta_netatalk(handle, smb_fname);
+		rc = fruit_unlink_meta_netatalk(handle, dirfsp, smb_fname);
 		break;
 
 	default:
@@ -3203,7 +3237,7 @@ static int fruit_stat_base(vfs_handle_struct *handle,
 	}
 	smb_fname->stream_name = tmp_stream_name;
 
-	DBG_DEBUG("fruit_stat_base [%s] dev [%ju] ino [%ju]\n",
+	DBG_DEBUG("[%s] dev [%ju] ino [%ju]\n",
 		  smb_fname->base_name,
 		  (uintmax_t)smb_fname->st.st_ex_dev,
 		  (uintmax_t)smb_fname->st.st_ex_ino);

@@ -1854,7 +1854,7 @@ char *ads_parent_dn(const char *dn)
 	const char *attrs[] = {
 		/* This is how Windows checks for machine accounts */
 		"objectClass",
-		"SamAccountName",
+		"sAMAccountName",
 		"userAccountControl",
 		"DnsHostName",
 		"ServicePrincipalName",
@@ -1875,7 +1875,7 @@ char *ads_parent_dn(const char *dn)
 
 	/* the easiest way to find a machine account anywhere in the tree
 	   is to look for hostname$ */
-	expr = talloc_asprintf(frame, "(samAccountName=%s$)", machine);
+	expr = talloc_asprintf(frame, "(sAMAccountName=%s$)", machine);
 	if (expr == NULL) {
 		status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
 		goto done;
@@ -1964,6 +1964,67 @@ static ADS_STATUS ads_modlist_add(TALLOC_CTX *ctx, ADS_MODLIST *mods,
 
 	modlist[curmod]->mod_op = mod_op;
 	return ADS_ERROR(LDAP_SUCCESS);
+}
+
+/*
+  dump a ADS_MODSLIST via DEBUG
+*/
+static void ads_dump_modlist(ADS_MODLIST *mods)
+{
+	LDAPMod **modlist = (LDAPMod **)*mods;
+	const char *op = NULL;
+	size_t i, j;
+	char *buf = NULL;
+
+	if (mods == NULL || DEBUGLEVEL < DBGLVL_DEBUG) {
+		return;
+	}
+
+	buf = talloc_strdup(talloc_tos(), "");
+
+	for (i = 0; modlist[i] != NULL; i++) {
+
+		/* only ever used three ops */
+
+		switch (modlist[i]->mod_op) {
+		case LDAP_MOD_DELETE:
+			op = "LDAP_MOD_DELETE";
+			break;
+		case LDAP_MOD_REPLACE:
+			op = "LDAP_MOD_REPLACE";
+			break;
+		case LDAP_MOD_REPLACE | LDAP_MOD_BVALUES:
+			op = "LDAP_MOD_REPLACE | LDAP_MOD_BVALUES";
+			break;
+		default:
+			op = "unknown";
+			break;
+		}
+
+		talloc_asprintf_addbuf(&buf, "mod[%zu]: mod_op: %s\n", i, op);
+		talloc_asprintf_addbuf(&buf,
+				       "mod[%zu]: mod_type: %s\n",
+				       i,
+				       modlist[i]->mod_type);
+
+		if (modlist[i]->mod_op & LDAP_MOD_BVALUES) {
+			continue;
+		}
+
+		for (j = 0; modlist[i]->mod_values[j] != NULL; j++) {
+			talloc_asprintf_addbuf(
+				&buf,
+				"mod[%zu]: mod_values[%zu]: %s\n",
+				i,
+				j,
+				modlist[i]->mod_values[j]);
+		}
+	}
+
+	if (buf != NULL) {
+		DBG_DEBUG("%s", buf);
+		TALLOC_FREE(buf);
+	}
 }
 
 /**
@@ -2073,6 +2134,9 @@ ADS_STATUS ads_gen_mod(ADS_STRUCT *ads, const char *mod_dn, ADS_MODLIST mods)
 	for(i=0;(mods[i]!=0)&&(mods[i]!=(LDAPMod *) -1);i++);
 	/* make sure the end of the list is NULL */
 	mods[i] = NULL;
+
+	ads_dump_modlist(&mods);
+
 	ret = ldap_modify_ext_s(ads->ldap.ld, utf8_dn,
 				(LDAPMod **) mods, controls, NULL);
 	ads_print_error(ret, ads->ldap.ld);
@@ -2104,6 +2168,8 @@ ADS_STATUS ads_gen_add(ADS_STRUCT *ads, const char *new_dn, ADS_MODLIST mods)
 	for(i=0;(mods[i]!=0)&&(mods[i]!=(LDAPMod *) -1);i++);
 	/* make sure the end of the list is NULL */
 	mods[i] = NULL;
+
+	ads_dump_modlist(&mods);
 
 	ret = ldap_add_ext_s(ads->ldap.ld, utf8_dn, (LDAPMod**)mods, NULL, NULL);
 	ads_print_error(ret, ads->ldap.ld);
@@ -2651,7 +2717,7 @@ ADS_STATUS ads_create_machine_acct(ADS_STRUCT *ads,
 				   const char *dns_domain_name)
 {
 	ADS_STATUS ret;
-	char *samAccountName = NULL;
+	char *samaccountname = NULL;
 	char *controlstr = NULL;
 	TALLOC_CTX *ctx = NULL;
 	ADS_MODLIST mods;
@@ -2725,8 +2791,8 @@ ADS_STATUS ads_create_machine_acct(ADS_STRUCT *ads,
 
 	/* Create machine account */
 
-	samAccountName = talloc_asprintf(ctx, "%s$", machine_name);
-	if (samAccountName == NULL) {
+	samaccountname = talloc_asprintf(ctx, "%s$", machine_name);
+	if (samaccountname == NULL) {
 		ret = ADS_ERROR(LDAP_NO_MEMORY);
 		goto done;
 	}
@@ -2803,7 +2869,7 @@ ADS_STATUS ads_create_machine_acct(ADS_STRUCT *ads,
 	}
 
 	ads_mod_str(ctx, &mods, "objectClass", "Computer");
-	ads_mod_str(ctx, &mods, "SamAccountName", samAccountName);
+	ads_mod_str(ctx, &mods, "sAMAccountName", samaccountname);
 	ads_mod_str(ctx, &mods, "userAccountControl", controlstr);
 	ads_mod_str(ctx, &mods, "DnsHostName", dns_hostname);
 	ads_mod_strlist(ctx, &mods, "ServicePrincipalName", spn_array);
@@ -2839,7 +2905,7 @@ ADS_STATUS ads_move_machine_acct(ADS_STRUCT *ads, const char *machine_name,
 	char *computer_rdn = NULL;
 	bool need_move = False;
 
-	if (asprintf(&filter, "(samAccountName=%s$)", machine_name) == -1) {
+	if (asprintf(&filter, "(sAMAccountName=%s$)", machine_name) == -1) {
 		rc = ADS_ERROR(LDAP_NO_MEMORY);
 		goto done;
 	}
